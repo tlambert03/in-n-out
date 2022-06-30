@@ -3,9 +3,8 @@ from __future__ import annotations
 import warnings
 from functools import wraps
 from inspect import isgeneratorfunction
-from typing import TYPE_CHECKING, Union, cast, overload
+from typing import TYPE_CHECKING, Any, Dict, List, Union, overload
 
-from ._providers import get_provider
 from ._store import Store
 from ._type_resolution import type_resolved_signature
 
@@ -126,6 +125,10 @@ def inject_dependencies(
         if sig is None:  # something went wrong, and the user was notified.
             return func
         process_result = sig.return_annotation is not sig.empty
+        return_anno = sig.return_annotation
+
+        names: List[str] = list(sig.parameters)
+        hints = [p.annotation for p in sig.parameters.values()]
 
         # get provider functions for each required parameter
         @wraps(func)
@@ -133,21 +136,23 @@ def inject_dependencies(
             # sourcery skip: use-named-expression
             # we're actually calling the "injected function" now
 
-            _sig = cast("Signature", sig)
             # first, get and call the provider functions for each parameter type:
             _kwargs = {}
-            for param in _sig.parameters.values():
-                provider: Optional[Callable] = get_provider(
-                    param.annotation, store=store
-                )
+            for n, name in enumerate(names):
+                provider: Optional[Callable] = _store._get_provider(hints[n])
                 if provider:
-                    _kwargs[param.name] = provider()
+                    _kwargs[name] = provider()
 
-            # use bind_partial to allow the caller to still provide their own arguments
-            # if desired. (i.e. the injected deps are only used if not provided)
-            bound = _sig.bind_partial(*args, **kwargs)
-            bound.apply_defaults()
-            _kwargs.update(**bound.arguments)
+            # this would be a safer way to merge arguments, but it's much slower
+            # bound = sig.bind_partial(*args, **kwargs)  # type: ignore
+            # bound.apply_defaults()
+            # _kwargs.update(**bound.arguments)
+
+            # significantly faster
+            _argdict: Dict[str, Any] = dict(zip(names, args))  # type: ignore
+            assert all(i not in _argdict for i in kwargs)
+            _kwargs.update(_argdict)
+            _kwargs.update(kwargs)
 
             try:  # call the function with injected values
                 result = func(**_kwargs)
@@ -158,7 +163,7 @@ def inject_dependencies(
                 ) from e
 
             if result is not None and process_result:
-                processor = _store._get_processor(_sig.return_annotation)
+                processor = _store._get_processor(return_anno)
                 if processor:
                     processor(result)
 
